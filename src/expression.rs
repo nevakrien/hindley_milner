@@ -13,7 +13,7 @@ use crate::unique::Unique;
 pub struct DefExp {
     pub var:  usize,
     pub var_val: Expression,
-    pub var_annotation: Option<Type>,
+    pub var_annotation: Type,
     pub ret:  Expression,
 }
 
@@ -23,7 +23,7 @@ pub struct LambdaExp {
     pub params:    Arc<[usize]>,
     pub in_types:  Arc<[Type]>,
     pub out_type:  Type,
-    pub body:      Box<Expression>,
+    pub body:      Arc<Expression>,
 }
 
 /// A built-in primitive (e.g. “+”) that runs a Rust closure.
@@ -105,7 +105,7 @@ impl Expression {
                     params:   le.params.clone(),
                     in_types: le.in_types.clone(),
                     out_type: le.out_type.clone(),
-                    body:     Arc::new(*le.body.clone()),
+                    body:     le.body.clone(),
                     env:      env.clone(),               // O(1) share
                 })))
             }
@@ -177,7 +177,7 @@ mod tests {
             params: Arc::new([param]),
             in_types: Arc::new([Type::NUM]),
             out_type: Type::NUM,
-            body: Box::new(body),
+            body: Arc::new(body),
         }))
     }
 
@@ -200,7 +200,7 @@ mod tests {
         let expr = E::Def(Arc::new(DefExp {
             var: 0,
             var_val: lit(5),
-            var_annotation: None,
+            var_annotation: Type::Generic(100),
             ret: var(0),
         }));
         assert_eq!(expr.eval(&empty_env()), Some(Int(5)));
@@ -236,7 +236,7 @@ mod tests {
         let program = E::Def(Arc::new(DefExp {
             var: 0,                      // x
             var_val: lit(10),
-            var_annotation: None,
+            var_annotation: Type::Generic(100),
             ret: call(add_x, vec![lit(5)].into()),
         }));
 
