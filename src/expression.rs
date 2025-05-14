@@ -10,6 +10,7 @@ use crate::unique::Unique;
 // ───── AST nodes  ──────────────────────────────────────────────────────────
 
 #[derive(Debug, PartialEq)]
+#[derive(Clone)]
 pub struct DefExp {
     pub var:  usize,
     pub var_val: Expression,
@@ -37,7 +38,8 @@ pub struct Builtin {
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum Expression {
-    Ref(usize),
+    /// the usize here is both the ID of the var AND its the ID used in the generic
+    Ref(usize,Type),
     Def(Arc<DefExp>),
     Lambda(Arc<LambdaExp>),
     Builtin(&'static Builtin),                    // behaves like a first-class fn
@@ -83,7 +85,7 @@ impl Expression {
         match self {
             // literals & variables ----------------------------------------------------------
             Expression::Lit(v)        => Some(v.clone()),
-            Expression::Ref(i)        => env.get(i).cloned(),
+            Expression::Ref(i, _)        => env.get(i).cloned(),
 
             // tuple -------------------------------------------------------------------------
             Expression::Tuple(es) => {
@@ -170,7 +172,7 @@ mod tests {
     use Value::*;
 
     fn lit(n: i64) -> E { E::Lit(Int(n)) }
-    fn var(i: usize) -> E { E::Ref(i) }
+    fn var(i: usize) -> E { E::Ref(i, Type::NUM) }
 
     fn lambda1(param: usize, body: E) -> E {
         E::Lambda(Arc::new(LambdaExp {
