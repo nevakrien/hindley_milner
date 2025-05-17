@@ -1,10 +1,13 @@
 //! expression.rs  –  minimal, type-annotated AST + small interpreter
 //! (Rust 2024 edition)
 
+use crate::types::GenericMap;
+use crate::value::Function;
 use im::HashMap as PMap;
 use std::sync::Arc;
 
 use crate::types::Type;
+use crate::value::Value;
 use crate::unique::Unique;
 
 // ───── AST nodes  ──────────────────────────────────────────────────────────
@@ -23,7 +26,7 @@ pub struct DefExp {
 pub struct LambdaExp {
     pub params:    Arc<[usize]>,
     pub in_types:  Arc<[Type]>,
-    pub out_type:  Type,
+    pub out_type:  Arc<Type>,
     pub body:      Arc<Expression>,
 }
 
@@ -32,7 +35,7 @@ pub struct LambdaExp {
 pub struct Builtin {
     pub name:      &'static str,
     pub in_types:  Arc<[Type]>,
-    pub out_type:  Type,
+    pub out_type:  Arc<Type>,
     pub exec:      fn(&[Value]) -> Option<Value>,
 }
 
@@ -59,28 +62,18 @@ fn extend(env: &Env, k: usize, v: Value) -> Env {
 
 pub fn empty_env() -> Env { Env::new() }
 
-// ───── Values & Functions  ────────────────────────────────────────────────
-
-#[derive(Debug, PartialEq)]
-pub struct Function {
-    pub params:    Arc<[usize]>,
-    pub in_types:  Arc<[Type]>,
-    pub out_type:  Type,
-    pub body:      Arc<Expression>,
-    pub env:       Env,                           // captured variables
-}
-
-#[derive(Debug, PartialEq, Clone)]
-pub enum Value {
-    Int(i64),
-    Func(Arc<Function>),
-    Flag(Unique),
-    Tuple(Arc<[Value]>),
-}
-
 // ───── Interpreter  ───────────────────────────────────────────────────────
 
 impl Expression {
+    //!!!mine!!!
+    pub fn get_type(&self) -> Type {
+        match self {
+            Expression::Tuple(a) => Type::Tuple(a.iter().map(Expression::get_type).collect()),
+            Expression::Lit(v) => v.get_type(),
+            Expression::Ref(_,t) => t.clone(), 
+            _ => todo!(),
+        }
+    }
     pub fn eval(&self, env: &Env) -> Option<Value> {
         match self {
             // literals & variables ----------------------------------------------------------
@@ -160,7 +153,7 @@ fn plus_exec(args: &[Value]) -> Option<Value> {
 pub static PLUS: Lazy<Builtin> = Lazy::new(|| Builtin {
     name:      "+",
     in_types:  Arc::new([Type::NUM, Type::NUM]),
-    out_type:  Type::NUM,
+    out_type:  Type::NUM.into(),
     exec:      plus_exec,
 });
 
@@ -178,7 +171,7 @@ mod tests {
         E::Lambda(Arc::new(LambdaExp {
             params: Arc::new([param]),
             in_types: Arc::new([Type::NUM]),
-            out_type: Type::NUM,
+            out_type: Type::NUM.into(),
             body: Arc::new(body),
         }))
     }

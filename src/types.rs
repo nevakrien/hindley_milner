@@ -92,17 +92,128 @@ impl Type {
 		
 	}
 
-	pub fn was_used_as(&self,req:&Self,bounded_gens:GenericMap)-> Result<(Self,Self,GenericMap,bool),()>{
+    /// Unify `self` with `req`, extending `bounded_gens`.
+    ///
+    /// Returns `(new_self, new_req, new_map, changed)`.
+    /// *`changed`* is `true` iff the generic-binding map grew or either
+    ///   returned type differs from its input.
+    pub fn was_used_as(
+        &self,
+        req: &Self,
+        bounded_gens: GenericMap,
+    ) -> Result<(Self, Self, GenericMap, bool), ()> {
+        use Type::*;
 
-		todo!()
-	}
+        match (self, req) {
+            // ───── concrete basics ─────────────────────────────────────────
+            (Basic(a), Basic(b)) => {
+                if a == b {
+                    Ok((self.clone(), req.clone(), bounded_gens, false))
+                } else {
+                    Err(())
+                }
+            }
+
+            // ───── self is a generic ───────────────────────────────────────
+            (Generic(id), other) => {
+                if let Some(bound) = bounded_gens.clone().get(id) {
+                    // The generic was already bound – unify the binding with `other`.
+                    let (lhs, rhs, new_map, changed) =
+                        bound.was_used_as(other, bounded_gens)?;
+                    Ok((lhs, rhs, new_map, changed))
+                } else if other == &Generic(*id) {
+                    // Generic used as itself – nothing changes.
+                    Ok((self.clone(), req.clone(), bounded_gens, false))
+                } else {
+                    // New binding:  id ↦ other
+                    let new_map = bounded_gens.update(*id, other.clone());
+                    Ok((other.clone(), other.clone(), new_map, true))
+                }
+            }
+
+            // ───── req is a generic (mirror of previous arm) ───────────────
+            (other, Generic(id)) => {
+                if let Some(bound) = bounded_gens.clone().get(id) {
+                    let (lhs, rhs, new_map, changed) =
+                        other.was_used_as(bound, bounded_gens)?;
+                    Ok((lhs, rhs, new_map, changed))
+                } else {
+                    let new_map = bounded_gens.update(*id, other.clone());
+                    Ok((other.clone(), other.clone(), new_map, true))
+                }
+            }
+
+            // ───── tuples – arity must match ───────────────────────────────
+            (Tuple(xs), Tuple(ys)) => {
+                if xs.len() != ys.len() {
+                    return Err(());
+                }
+
+                let mut map   = bounded_gens;
+                let mut chg   = false;
+                let mut left  = Vec::with_capacity(xs.len());
+                let mut right = Vec::with_capacity(ys.len());
+
+                for (x, y) in xs.iter().zip(ys.iter()) {
+                    let (nx, ny, m, c) = x.was_used_as(y, map)?;
+                    map = m;
+                    chg |= c;
+                    left.push(nx);
+                    right.push(ny);
+                }
+
+                Ok((
+                    Tuple(left.into()),
+                    Tuple(right.into()),
+                    map,
+                    chg,
+                ))
+            }
+
+            // ───── functions – parameter-count must match ──────────────────
+            (Func(px, rx), Func(py, ry)) => {
+                if px.len() != py.len() {
+                    return Err(());
+                }
+
+                let mut map   = bounded_gens;
+                let mut chg   = false;
+                let mut lp    = Vec::with_capacity(px.len());
+                let mut rp    = Vec::with_capacity(py.len());
+
+                // parameters
+                for (a, b) in px.iter().zip(py.iter()) {
+                    let (na, nb, m, c) = a.was_used_as(b, map)?;
+                    map = m;
+                    chg |= c;
+                    lp.push(na);
+                    rp.push(nb);
+                }
+
+                // result types
+                let (nr1, nr2, map, c2) = rx.as_ref().was_used_as(ry.as_ref(), map)?;
+                chg |= c2;
+
+                Ok((
+                    Func(lp.into(), Arc::new(nr1.clone())),
+                    Func(rp.into(), Arc::new(nr2.clone())),
+                    map,
+                    chg,
+                ))
+            }
+
+            // ───── any other shape combination is a hard mismatch ──────────
+            _ => Err(()),
+        }
+    }
+
 
 }
 
 
 pub type DefMap = HashMap<usize,Arc<DefExp>>;
 
-pub fn update_expr(exp:Expression,bounded_gens:GenericMap,def_map:DefMap) -> Result<(Expression,GenericMap,DefMap,bool),()> {
+pub fn update_expr(exp:Expression,mut bounded_gens:GenericMap,mut def_map:DefMap) -> Result<(Expression,GenericMap,DefMap,bool),()> {
 	match exp {
 		Expression::Ref(i, ref t) => {
 			//limit the definined var by the refrence
@@ -119,6 +230,12 @@ pub fn update_expr(exp:Expression,bounded_gens:GenericMap,def_map:DefMap) -> Res
 		Expression::Def(mut def) => {
 			let mut changed = false;
 			
+			let (_x,t,bounded_gens,b) = def.var_val.get_type().was_used_as(&def.var_annotation,bounded_gens)?;
+			changed |= b;
+			Arc::make_mut(&mut def).var_annotation = t;		
+
+
+			//check on the val discarding the inner of the creator
 			let (new_val,bounded_gens,_,b) = update_expr(def.var_val.clone(),bounded_gens.clone(),def_map.clone())?;
 			
 			changed |= b;	
@@ -135,7 +252,21 @@ pub fn update_expr(exp:Expression,bounded_gens:GenericMap,def_map:DefMap) -> Res
 		}
 		Expression::Lit(_) => Ok((exp,bounded_gens,def_map,false)),
 
-	    _ => todo!(),
+		Expression::Tuple(arr) => {
+			let mut changed = false;
+			let mut v = Vec::with_capacity(arr.len());
+			for e in arr.into_iter() {
+				let (exp,gens,defs,b) = update_expr(e.clone(),bounded_gens,def_map)?;
+				v.push(exp);
+				bounded_gens = gens;
+				def_map = defs;
+				changed |= b;
+			}
+
+			Ok((Expression::Tuple(v.into()),bounded_gens,def_map,changed))
+		},
+		Expression::Lambda(_) | Expression::Builtin(_) | Expression::Call(_, _) => todo!()
+
 	}
 }
 
@@ -161,3 +292,82 @@ pub fn find_typing(exp:Expression,bounded_gens:GenericMap) -> Result<Expression,
 }
 
 
+
+
+#[cfg(test)]
+mod typing_tests {
+    use super::*;                // pull in everything we just defined
+    use crate::expression::{Expression as E, DefExp};
+    use crate::value::Value;
+    use im::HashMap as PMap;     // only for readability in this module
+
+    // ─── quick helpers ────────────────────────────────────────────────────
+    fn lit(n: i64) -> E { E::Lit(Value::Int(n)) }
+
+    // let-style reference with an explicit type
+    fn var(id: usize, ty: Type) -> E { E::Ref(id, ty) }
+
+    // ─── 1. single generic unified with an Int literal ───────────────────
+    //
+    //   let x : T = 5 in x
+    //
+    // Should produce    let x : NUM = 5 in x
+    //
+    #[test]
+    fn find_typing_scalar_generic() {
+        let expr = E::Def(Arc::new(DefExp {
+            var:            0,
+            var_val:        lit(5),
+            var_annotation: Type::Generic(0),
+            ret:            var(0, Type::Generic(1)),
+        }));
+
+        let typed = find_typing(expr, GenericMap::new()).expect("typing succeeds");
+
+        if let E::Def(d) = typed {
+            assert_eq!(d.var_annotation, Type::NUM);            // T ↦ NUM
+
+            if let E::Ref(_, ref t) = d.ret {
+                assert_eq!(t, &Type::NUM);                      // body updated
+            } else {
+                panic!("expected Ref in Def body");
+            }
+        } else {
+            panic!("expected outer Def expression");
+        }
+    }
+
+    // ─── 2. tuple with two generics unified to (Int, Int) ────────────────
+    //
+    //   let p : (A, B) = (1, 2) in p
+    //
+    // Should produce    let p : (NUM, NUM) = (1, 2) in p
+    //
+    #[test]
+    fn find_typing_tuple_generics() {
+        let tuple_gen = Type::Tuple(Arc::new([Type::Generic(0), Type::Generic(1)]));
+
+        let expr = E::Def(Arc::new(DefExp {
+            var:            1,
+            var_val:        E::Tuple(Arc::new([lit(1), lit(2)])),
+            var_annotation: tuple_gen.clone(),
+            ret:            var(1, tuple_gen),
+        }));
+
+        let typed = find_typing(expr, GenericMap::new()).expect("typing succeeds");
+
+        if let E::Def(d) = typed {
+            let expected = Type::Tuple(Arc::new([Type::NUM, Type::NUM]));
+
+            assert_eq!(d.var_annotation, expected);             // (A,B) ↦ (NUM,NUM)
+
+            if let E::Ref(_, t) = &d.ret {
+                assert_eq!(*t, expected);                       // body updated
+            } else {
+                panic!("expected Ref in Def body");
+            }
+        } else {
+            panic!("expected outer Def expression");
+        }
+    }
+}
