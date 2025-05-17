@@ -370,4 +370,20 @@ mod typing_tests {
             panic!("expected outer Def expression");
         }
     }
+
+     // ─── 3. annotation/value mismatch should error ─────────────────────────
+    #[test]
+    fn find_typing_annotation_value_mismatch() {
+        // let x : (A, B) = 5 in x
+        let tuple_gen = Type::Tuple(Arc::new([Type::Generic(0), Type::Generic(1)]));
+        let expr = E::Def(Arc::new(DefExp {
+            var:            0,
+            var_val:        lit(5),
+            var_annotation: tuple_gen,
+            ret:            var(0, Type::Generic(0)),
+        }));
+
+        // we expect a type‐error because a single Int (NUM) cannot unify with a 2‐tuple
+        find_typing(expr, GenericMap::new()).unwrap_err();
+    }
 }
