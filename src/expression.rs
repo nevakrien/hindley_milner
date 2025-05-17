@@ -46,7 +46,7 @@ pub enum Expression {
     Def(Arc<DefExp>),
     Lambda(Arc<LambdaExp>),
     Builtin(&'static Builtin),                    // behaves like a first-class fn
-    Call(Arc<Expression>, Arc<[Expression]>),
+    Call(Arc<Expression>, Arc<[Expression]>,Type),
     Lit(Value),
     Tuple(Arc<[Expression]>),
 }
@@ -68,10 +68,13 @@ impl Expression {
     //!!!mine!!!
     pub fn get_type(&self) -> Type {
         match self {
-            Expression::Tuple(a) => Type::Tuple(a.iter().map(Expression::get_type).collect()),
+            Expression::Tuple(a) => Type::Tuple(a.iter().map(Expression::get_type.clone()).collect()),
             Expression::Lit(v) => v.get_type(),
             Expression::Ref(_,t) => t.clone(), 
-            _ => todo!(),
+            Expression::Lambda(l) => Type::Func(l.in_types.clone(),l.out_type.clone()),
+            Expression::Def(d) => d.ret.get_type(),
+            Expression::Builtin(b) => Type::Func(b.in_types.clone(),b.out_type.clone()),
+            Expression::Call(_, _,t) => t.clone(),
         }
     }
     pub fn eval(&self, env: &Env) -> Option<Value> {
@@ -115,7 +118,7 @@ impl Expression {
             }))),
 
             // call --------------------------------------------------------------------------
-            Expression::Call(f_expr, arg_exprs) => {
+            Expression::Call(f_expr, arg_exprs, _) => {
                 // ---- Handle Builtin directly (fast-path, avoids alloc of Func wrapper) ----
                 if let Expression::Builtin(b) = f_expr.as_ref() {
                     let mut args_v = Vec::with_capacity(arg_exprs.len());
@@ -176,8 +179,8 @@ mod tests {
         }))
     }
 
-    fn call(fn_e: E, args: Arc<[E]>) -> E {
-        E::Call(Arc::new(fn_e), args)
+    fn call(fn_e: E, args: Arc<[E]>,genr: usize) -> E {
+        E::Call(Arc::new(fn_e), args,Type::Generic(genr))
     }
 
     // ------------- individual expression kinds -------------------------------------------
@@ -214,7 +217,7 @@ mod tests {
 
     #[test]
     fn lambda_and_call() {
-        let expr = call(lambda1(0, var(0)), vec![lit(42)].into());
+        let expr = call(lambda1(0, var(0)), vec![lit(42)].into(),1);
         assert_eq!(expr.eval(&empty_env()), Some(Int(42)));
     }
 
@@ -225,14 +228,14 @@ mod tests {
 
         let add_x = lambda1(
             1,
-            call(plus_node.clone(), vec![var(0), var(1)].into()), // x + y
+            call(plus_node.clone(), vec![var(0), var(1)].into(),1), // x + y
         );
 
         let program = E::Def(Arc::new(DefExp {
             var: 0,                      // x
             var_val: lit(10),
             var_annotation: Type::Generic(100),
-            ret: call(add_x, vec![lit(5)].into()),
+            ret: call(add_x, vec![lit(5)].into(),1),
         }));
 
         assert_eq!(program.eval(&empty_env()), Some(Int(15)));

@@ -250,7 +250,7 @@ pub fn update_expr(exp:Expression,mut bounded_gens:GenericMap,mut def_map:DefMap
 			Ok((Expression::Def(def),bounded_gens,def_map,changed))
 
 		}
-		Expression::Lit(_) => Ok((exp,bounded_gens,def_map,false)),
+		Expression::Lit(_) | Expression::Builtin(_) => Ok((exp,bounded_gens,def_map,false)),
 
 		Expression::Tuple(arr) => {
 			let mut changed = false;
@@ -265,7 +265,44 @@ pub fn update_expr(exp:Expression,mut bounded_gens:GenericMap,mut def_map:DefMap
 
 			Ok((Expression::Tuple(v.into()),bounded_gens,def_map,changed))
 		},
-		Expression::Lambda(_) | Expression::Builtin(_) | Expression::Call(_, _) => todo!()
+		Expression::Lambda(_)  => todo!(),
+
+		Expression::Call(out,args , out_anot) => {
+			let mut changed = false;
+
+			let ( out, out_args,out_anot) = match *out {
+				Expression::Builtin(f) => {
+					if f.in_types.len()!=args.len() {
+						return Err(())
+					}
+
+					let (new_ty,_,bg,b) =out_anot.was_used_as(&f.out_type,bounded_gens)?;
+					bounded_gens = bg;
+					changed |= b;
+					( out , f.in_types.clone(),new_ty)
+				},
+				Expression::Lambda(ref _l) => todo!(),
+				_ => return  Err(())
+			};
+
+			let mut new_args = Vec::with_capacity(args.len());
+			for (a,t) in args.iter().zip(out_args.iter()) {
+				let (a,bg,_,b) = update_expr(a.clone(),bounded_gens,def_map.clone())?;
+				changed |= b;
+
+				let (_,_,bg,b) = t.was_used_as(&a.get_type(),bg)?;
+				changed |= b;
+				
+				bounded_gens = bg;
+				new_args.push(a);
+			}
+
+
+			let args : Arc<[Expression]> = new_args.into_iter().collect();
+
+			let new_me = Expression::Call(out,args,out_anot);
+			Ok((new_me,bounded_gens,def_map,changed))
+		}
 
 	}
 }
@@ -296,7 +333,8 @@ pub fn find_typing(exp:Expression,bounded_gens:GenericMap) -> Result<Expression,
 
 #[cfg(test)]
 mod typing_tests {
-    use super::*;                // pull in everything we just defined
+    use crate::expression::PLUS;
+use super::*;                // pull in everything we just defined
     use crate::expression::{Expression as E, DefExp};
     use crate::value::Value;
     use im::HashMap as PMap;     // only for readability in this module
@@ -385,5 +423,17 @@ mod typing_tests {
 
         // we expect a type‐error because a single Int (NUM) cannot unify with a 2‐tuple
         find_typing(expr, GenericMap::new()).unwrap_err();
+    }
+
+    #[test]
+    fn simple_call_check() {
+    	let expr = Expression::Call(
+    		 Expression::Builtin(&PLUS).into(),
+    		Arc::new([Expression::Lit(Value::Int(1)),Expression::Lit(Value::Int(1))])
+    		,Type::Generic(2)
+    	);
+    	let typed = find_typing(expr, GenericMap::new()).expect("typing succeeds");
+    	assert_eq!(Type::NUM,typed.get_type());
+
     }
 }
