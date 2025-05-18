@@ -40,8 +40,8 @@ pub fn resolve_mappings(map:&GenericMap) -> (GenericMap,bool) {
 		while let Some(v) = map.get(cur) {
 			match v {
 				Type::Generic(i) => {
-					println!("in resolve loop");
-					if i==k {
+					println!("in resolve loop {cur} {i}");
+					if keys[1..].contains(i) {
 						break;
 					}
 					match ans.get(i) {
