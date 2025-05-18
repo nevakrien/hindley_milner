@@ -1,3 +1,4 @@
+use crate::expression::LambdaExp;
 use crate::expression::DefExp;
 use crate::expression::Expression;
 use im::HashMap;
@@ -265,7 +266,22 @@ pub fn update_expr(exp:Expression,mut bounded_gens:GenericMap,mut def_map:DefMap
 
 			Ok((Expression::Tuple(v.into()),bounded_gens,def_map,changed))
 		},
-		Expression::Lambda(_)  => todo!(),
+		Expression::Lambda(l)  => {
+			let mut changed = false;
+			let (body,bounded_gens,_,b) = update_expr((*l.body).clone(),bounded_gens,def_map.clone())?;
+			changed |= b;
+
+			let (out_type,_,bounded_gens,b) = l.out_type.was_used_as(&body.get_type(),bounded_gens)?;
+			changed |= b;
+			let new_me = Expression::Lambda(LambdaExp{
+				params:l.params.clone(),
+				out_type: out_type.into(),
+				in_types:l.in_types.clone(),
+				body: body.into()
+			}.into());
+
+			Ok((new_me,bounded_gens,def_map,changed))
+		},
 
 		Expression::Call(out,args , out_anot) => {
 			let mut changed = false;
@@ -286,13 +302,16 @@ pub fn update_expr(exp:Expression,mut bounded_gens:GenericMap,mut def_map:DefMap
 			};
 
 			let mut new_args = Vec::with_capacity(args.len());
+			let mut new_arg_types = Vec::with_capacity(args.len());
+
 			for (a,t) in args.iter().zip(out_args.iter()) {
 				let (a,bg,_,b) = update_expr(a.clone(),bounded_gens,def_map.clone())?;
 				changed |= b;
 
-				let (_,_,bg,b) = t.was_used_as(&a.get_type(),bg)?;
+				let (nt,_,bg,b) = t.was_used_as(&a.get_type(),bg)?;
+				new_arg_types.push(nt);
 				changed |= b;
-				
+
 				bounded_gens = bg;
 				new_args.push(a);
 			}
@@ -436,4 +455,73 @@ use super::*;                // pull in everything we just defined
     	assert_eq!(Type::NUM,typed.get_type());
 
     }
+
+        // ─── 4. creation of a stand-alone lambda should infer its out_type ───
+    #[test]
+    fn lambda_creation_type_inference() {
+        // λx. 5  with param annotated G0 and out annotated G1
+        let lam = E::Lambda(Arc::new(LambdaExp {
+            params:   Arc::new([0]),
+            in_types: Arc::new([Type::Generic(0)]),
+            out_type: Type::Generic(1).into(),
+            body:     Arc::new(lit(5)),
+        }));
+
+        let typed = find_typing(lam, GenericMap::new())
+            .expect("lambda type‐checks");
+
+        if let E::Lambda(le) = typed {
+            // parameter stays G0 (no clue what it must be)
+            assert_eq!(le.in_types[0], Type::Generic(0));
+            // but the literal body forces out_type ↦ NUM
+            assert_eq!(le.out_type, Type::NUM.into());
+        } else {
+            panic!("expected a Lambda node after typing");
+        }
+    }
+
+    // ─── 5. nested defs forcing two rounds of inference ───────────────────
+    #[test]
+    fn nested_defs_unify_generics_in_two_passes() {
+        // let x : G0 = 5 in
+        //   let y : G1 = x in
+        //     y
+        let inner = E::Def(Arc::new(DefExp {
+            var:            1,
+            var_val:        var(0, Type::Generic(0)),    // x : G0
+            var_annotation: Type::Generic(1),             // y : G1
+            ret:            var(1, Type::Generic(1)),
+        }));
+        let outer = E::Def(Arc::new(DefExp {
+            var:            0,
+            var_val:        lit(5),
+            var_annotation: Type::Generic(2),             // x : G0
+            ret:            inner,
+        }));
+
+        let typed = find_typing(outer, GenericMap::new())
+            .expect("nested defs type‐check");
+
+        // Outer def’s annotation G0 ↦ NUM
+        if let E::Def(d1) = typed {
+            assert_eq!(d1.var_annotation, Type::NUM);
+
+            // Inner def also unified: G1 ↦ NUM
+            if let E::Def(d2) = &d1.ret {
+                assert_eq!(d2.var_annotation, Type::NUM);
+
+                // And the final "y" in the body is now Ref(_, NUM)
+                if let E::Ref(_, t) = &d2.ret {
+                    assert_eq!(t, &Type::NUM);
+                } else {
+                    panic!("expected Ref in inner Def body");
+                }
+            } else {
+                panic!("expected inner Def expression");
+            }
+        } else {
+            panic!("expected outer Def expression");
+        }
+    }
+
 }
