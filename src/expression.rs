@@ -1,6 +1,7 @@
 //! expression.rs  –  minimal, type-annotated AST + small interpreter
 //! (Rust 2024 edition)
 
+use std::ffi::c_void;
 use crate::types::GenericMap;
 use crate::value::Function;
 use im::HashMap as PMap;
@@ -22,7 +23,7 @@ pub struct DefExp {
 }
 
 /// A λ-expression with explicit type annotations.
-#[derive(Debug, PartialEq)]
+#[derive(Debug,Clone, PartialEq)]
 pub struct LambdaExp {
     pub params:    Arc<[usize]>,
     pub in_types:  Arc<[Type]>,
@@ -77,6 +78,18 @@ impl Expression {
             Expression::Call(_, _,t) => t.clone(),
         }
     }
+
+    //misguided
+    // pub fn get_ptr(&self) -> Option<*const c_void> {
+    //     match self {
+    //         Expression::Tuple(a)=> Some(Arc::as_ptr(a) as _),
+    //         Expression::Lambda(a)=> Some(Arc::as_ptr(a) as _),
+    //         Expression::Def(a)=> Some(Arc::as_ptr(a) as _),
+    //         Expression::Builtin(r)=> Some(*r as *const Builtin as _),
+    //         _=> None,
+    //     }
+    // }
+
     pub fn eval(&self, env: &Env) -> Option<Value> {
         match self {
             // literals & variables ----------------------------------------------------------

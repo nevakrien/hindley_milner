@@ -1,3 +1,5 @@
+use std::ffi::c_void;
+// use im::HashSet;
 use crate::expression::LambdaExp;
 use crate::expression::DefExp;
 use crate::expression::Expression;
@@ -6,7 +8,7 @@ use std::sync::Arc;
 use crate::unique::Unique;
 
 
-#[derive(Debug,PartialEq,Clone)]
+#[derive(Debug,PartialEq,Clone,Hash,Eq)]
 pub enum Type {
 	Generic(usize),
 
@@ -35,6 +37,10 @@ pub fn resolve_mappings(map:&GenericMap) -> (GenericMap,bool) {
 		while let Some(v) = map.get(cur) {
 			match v {
 				Type::Generic(i) => {
+					// println!("in resolve loop");
+					if i==k {
+						break;
+					}
 					match ans.get(i) {
 						None => {
 							changed = true;
@@ -93,17 +99,46 @@ impl Type {
 		
 	}
 
-    /// Unify `self` with `req`, extending `bounded_gens`.
+	/// Unify `self` with `req`, extending `bounded_gens`.
     ///
     /// Returns `(new_self, new_req, new_map, changed)`.
     /// *`changed`* is `true` iff the generic-binding map grew or either
     ///   returned type differs from its input.
-    pub fn was_used_as(
+	pub fn was_used_as(
         &self,
         req: &Self,
         bounded_gens: GenericMap,
+    ) -> Result<(Self, Self, GenericMap, bool), ()>{
+		self._was_used_as(req,bounded_gens,&mut std::collections::HashSet::new())
+    }
+
+	
+
+
+    fn _was_used_as(
+        &self,
+        req: &Self,
+        bounded_gens: GenericMap,
+        seen:&mut std::collections::HashSet<Type>,
     ) -> Result<(Self, Self, GenericMap, bool), ()> {
         use Type::*;
+
+		println!("calling _was_used_as");
+
+		// note that this is only a half measure 
+		// however it is nicer than it seems:
+		// 
+		// 		1. if these 2 types apear in multiple places 
+		//         then the chagned from the first
+		// 		   would trigger a rerun later
+		//
+		//      2. while its true we are not checking for pairs properly
+		// 		   and yes this is technically losing info
+		//         checking for all pairs can be very expensive O(N^2 * runs)
+		//         and it is not necissrally worth it for most apps
+		if !seen.insert(self.clone()) && !seen.insert(req.clone()) {
+			return Ok((self.clone(),req.clone(),bounded_gens,false))
+		}
 
         match (self, req) {
             // ───── concrete basics ─────────────────────────────────────────
@@ -120,7 +155,7 @@ impl Type {
                 if let Some(bound) = bounded_gens.clone().get(id) {
                     // The generic was already bound – unify the binding with `other`.
                     let (lhs, rhs, new_map, changed) =
-                        bound.was_used_as(other, bounded_gens)?;
+                        bound._was_used_as(other, bounded_gens,seen)?;
                     Ok((lhs, rhs, new_map, changed))
                 } else if other == &Generic(*id) {
                     // Generic used as itself – nothing changes.
@@ -136,7 +171,7 @@ impl Type {
             (other, Generic(id)) => {
                 if let Some(bound) = bounded_gens.clone().get(id) {
                     let (lhs, rhs, new_map, changed) =
-                        other.was_used_as(bound, bounded_gens)?;
+                        other._was_used_as(bound, bounded_gens,seen)?;
                     Ok((lhs, rhs, new_map, changed))
                 } else {
                     let new_map = bounded_gens.update(*id, other.clone());
@@ -156,7 +191,7 @@ impl Type {
                 let mut right = Vec::with_capacity(ys.len());
 
                 for (x, y) in xs.iter().zip(ys.iter()) {
-                    let (nx, ny, m, c) = x.was_used_as(y, map)?;
+                    let (nx, ny, m, c) = x._was_used_as(y, map,seen)?;
                     map = m;
                     chg |= c;
                     left.push(nx);
@@ -184,7 +219,7 @@ impl Type {
 
                 // parameters
                 for (a, b) in px.iter().zip(py.iter()) {
-                    let (na, nb, m, c) = a.was_used_as(b, map)?;
+                    let (na, nb, m, c) = a._was_used_as(b, map,seen)?;
                     map = m;
                     chg |= c;
                     lp.push(na);
@@ -192,7 +227,7 @@ impl Type {
                 }
 
                 // result types
-                let (nr1, nr2, map, c2) = rx.as_ref().was_used_as(ry.as_ref(), map)?;
+                let (nr1, nr2, map, c2) = rx.as_ref()._was_used_as(ry.as_ref(), map,seen)?;
                 chg |= c2;
 
                 Ok((
@@ -212,19 +247,45 @@ impl Type {
 }
 
 
-pub type DefMap = HashMap<usize,Arc<DefExp>>;
+#[derive(Debug,Clone,PartialEq)]
+pub enum Var {
+	Defed(Arc<DefExp>),
+	Arg(Type)
+} 
+
+impl Var {
+	pub fn get_type_ref(&self) -> &Type {
+		match self {
+			Var::Defed(defexp) => &defexp.var_annotation,
+			Var::Arg(t) => t
+		}
+	}
+
+	pub fn set_type(&mut self,x:Type){
+		match self {
+			Var::Defed(defexp) => Arc::make_mut(defexp).var_annotation=x,
+			Var::Arg(t) => *t=x
+		}
+	}
+}
+
+pub type DefMap = HashMap<usize,Var>;
+// pub type Seen = std::collections::HashSet<*const c_void>;
+
 
 pub fn update_expr(exp:Expression,mut bounded_gens:GenericMap,mut def_map:DefMap) -> Result<(Expression,GenericMap,DefMap,bool),()> {
+	println!("calling update_expr");
+
 	match exp {
 		Expression::Ref(i, ref t) => {
 			//limit the definined var by the refrence
-			let mut defexp = def_map[&i].clone();
-			let tdef = &defexp.var_annotation;
+			let mut var = def_map[&i].clone();
+			let tdef = var.get_type_ref();
 			let (tdef,t,bounded_gens,b) = tdef.was_used_as(t,bounded_gens)?;
 			
 			//update all our metadata
-			Arc::make_mut(&mut defexp).var_annotation=tdef;
-			let def_map = def_map.update(i,defexp);
+			var.set_type(tdef);
+			let def_map = def_map.update(i,var);
 			let me = Expression::Ref(i,t);
 			Ok((me,bounded_gens,def_map,b))
 		},
@@ -237,12 +298,12 @@ pub fn update_expr(exp:Expression,mut bounded_gens:GenericMap,mut def_map:DefMap
 
 
 			//check on the val discarding the inner of the creator
-			let (new_val,bounded_gens,_,b) = update_expr(def.var_val.clone(),bounded_gens.clone(),def_map.clone())?;
+			let (new_val,bounded_gens,_,b) = update_expr(def.var_val.clone(),bounded_gens,def_map.clone())?;
 			
 			changed |= b;	
 			Arc::make_mut(&mut def).var_val = new_val;		
 
-			let def_map = def_map.update(def.var,def.clone());
+			let def_map = def_map.update(def.var,Var::Defed(def.clone()));
 			let (new_ret,bounded_gens,_,b) = update_expr(def.ret.clone(),bounded_gens,def_map.clone())?;
 
 			changed |= b;	
@@ -267,16 +328,26 @@ pub fn update_expr(exp:Expression,mut bounded_gens:GenericMap,mut def_map:DefMap
 			Ok((Expression::Tuple(v.into()),bounded_gens,def_map,changed))
 		},
 		Expression::Lambda(l)  => {
+			// println!("calling lambda resolve");
+
 			let mut changed = false;
-			let (body,bounded_gens,_,b) = update_expr((*l.body).clone(),bounded_gens,def_map.clone())?;
+
+			let mut inner_map = def_map.clone();
+			for (i,t) in l.params.iter().zip(l.in_types.iter()){
+				inner_map=inner_map.update(*i,Var::Arg(t.clone()));
+			}
+
+			let (body,bounded_gens,inner_map,b) = update_expr((*l.body).clone(),bounded_gens,inner_map)?;
 			changed |= b;
+
+			let in_types = l.params.iter().map(|i| inner_map[i].get_type_ref().clone()).collect();
 
 			let (out_type,_,bounded_gens,b) = l.out_type.was_used_as(&body.get_type(),bounded_gens)?;
 			changed |= b;
 			let new_me = Expression::Lambda(LambdaExp{
 				params:l.params.clone(),
 				out_type: out_type.into(),
-				in_types:l.in_types.clone(),
+				in_types,
 				body: body.into()
 			}.into());
 
@@ -286,40 +357,33 @@ pub fn update_expr(exp:Expression,mut bounded_gens:GenericMap,mut def_map:DefMap
 		Expression::Call(out,args , out_anot) => {
 			let mut changed = false;
 
-			let ( out, out_args,out_anot) = match *out {
-				Expression::Builtin(f) => {
-					if f.in_types.len()!=args.len() {
-						return Err(())
-					}
+			let (out,mut bounded_gens,_,b) = update_expr((*out).clone(),bounded_gens,def_map.clone())?;
+			changed|= b;
 
-					let (new_ty,_,bg,b) =out_anot.was_used_as(&f.out_type,bounded_gens)?;
-					bounded_gens = bg;
-					changed |= b;
-					( out , f.in_types.clone(),new_ty)
-				},
-				Expression::Lambda(ref _l) => todo!(),
-				_ => return  Err(())
-			};
 
 			let mut new_args = Vec::with_capacity(args.len());
-			let mut new_arg_types = Vec::with_capacity(args.len());
 
-			for (a,t) in args.iter().zip(out_args.iter()) {
+			for a in args.iter() {
 				let (a,bg,_,b) = update_expr(a.clone(),bounded_gens,def_map.clone())?;
-				changed |= b;
-
-				let (nt,_,bg,b) = t.was_used_as(&a.get_type(),bg)?;
-				new_arg_types.push(nt);
 				changed |= b;
 
 				bounded_gens = bg;
 				new_args.push(a);
 			}
 
+			let arg_types = new_args.iter().map(Expression::get_type).collect();
+			let sig = Type::Func(arg_types,out_anot.into());
+
+			let (sig,_,bounded_gens,b) = sig.was_used_as(&out.get_type(),bounded_gens)?;
+			changed|=b;
+			let out_anot = match sig {
+				Type::Func(_,t) => (*t).clone(),
+				_=> return Err(())
+			};
 
 			let args : Arc<[Expression]> = new_args.into_iter().collect();
 
-			let new_me = Expression::Call(out,args,out_anot);
+			let new_me = Expression::Call(out.into(),args,out_anot);
 			Ok((new_me,bounded_gens,def_map,changed))
 		}
 
@@ -341,6 +405,7 @@ pub fn find_typing(exp:Expression,bounded_gens:GenericMap) -> Result<Expression,
 	let (exp,bounded_gens,_,b) = update_expr(exp,bounded_gens,DefMap::new())?;
 	changed |= b;
 	if changed {
+		// println!("after run {:?}",exp);
 		find_typing(exp,bounded_gens)
 	}else{
 		Ok(exp)
@@ -523,5 +588,115 @@ use super::*;                // pull in everything we just defined
             panic!("expected outer Def expression");
         }
     }
+
+
+    use crate::expression::LambdaExp;  // make sure this is in scope
+// …
+
+    // ─── 6. bind a lambda to a var, return it, then call it ───────────────
+    #[test]
+    fn lambda_returned_as_value_and_called() {
+        // let f : G0 = λx:G1. x in f(9)
+        let lam = E::Lambda(Arc::new(LambdaExp {
+            params:   Arc::new([0]),
+            in_types: Arc::new([Type::Generic(1)]),
+            out_type: Type::Generic(2).into(),
+            body:     Arc::new(var(0, Type::Generic(1))),
+        }));
+
+        let expr = E::Def(Arc::new(DefExp {
+            var:            0,
+            var_val:        lam,
+            var_annotation: Type::Generic(0),
+            ret: E::Call(
+                Arc::new(E::Ref(0, Type::Generic(0))),
+                Arc::new([lit(9)]),
+                Type::Generic(3),
+            ),
+        }));
+
+        let typed = find_typing(expr, GenericMap::new()).expect("typing succeeds");
+
+        // f’s annotation G0 → Func([NUM], NUM)
+        if let E::Def(d) = typed {
+            let func_ty = Type::Func(Arc::new([Type::NUM]), Arc::new(Type::NUM));
+            assert_eq!(d.var_annotation, func_ty);
+
+            // the Call’s result must unify to NUM
+            if let E::Call(_, _, out_t) = &d.ret {
+                assert_eq!(*	out_t, Type::NUM);
+            } else {
+                panic!("expected a Call node");
+            }
+        } else {
+            panic!("expected outer Def");
+        }
+    }
+
+    // ─── 7. higher-order lambda and nested calls ───────────────────────────
+    #[test]
+    fn higher_order_lambda_and_nested_call() {
+        // let make_adder : G0 = λx:G1. λy:G2. x + y in
+        //   let add_two : G3 = make_adder(2) in
+        //     add_two(3)
+        let make_adder = E::Lambda(Arc::new(LambdaExp {
+            params:   Arc::new([0]),
+            in_types: Arc::new([Type::Generic(1)]),
+            out_type: Type::Generic(2).into(),
+            body: Arc::new(E::Lambda(Arc::new(LambdaExp {
+                params:   Arc::new([1]),
+                in_types: Arc::new([Type::Generic(3)]),
+                out_type: Type::Generic(4).into(),
+                body:     Arc::new(E::Call(
+                    Arc::new(E::Builtin(&PLUS)),
+                    Arc::new([ var(0, Type::Generic(1)), var(1, Type::Generic(3)) ]),
+                    Type::Generic(4),
+                )),
+            }))),
+        }));
+
+        // inner def: add_two = make_adder(2); result = add_two(3)
+        let inner = E::Def(Arc::new(DefExp {
+            var:            1,
+            var_val:        E::Call(
+                                Arc::new(E::Ref(0, Type::Generic(0))),
+                                Arc::new([lit(2)]),
+                                Type::Generic(5),
+                            ),
+            var_annotation: Type::Generic(6),
+            ret:            E::Call(
+                                Arc::new(E::Ref(1, Type::Generic(6))),
+                                Arc::new([lit(3)]),
+                                Type::Generic(7),
+                            ),
+        }));
+
+        let outer = E::Def(Arc::new(DefExp {
+            var:            0,
+            var_val:        make_adder,
+            var_annotation: Type::Generic(0),
+            ret:            inner,
+        }));
+
+        let typed = find_typing(outer, GenericMap::new())
+            .expect("nested higher-order call type-checks");
+
+        // make_adder : G0 ↦ Func([NUM], Func([NUM], NUM))
+        if let E::Def(d0) = typed {
+            let inner_fn = Type::Func(Arc::new([Type::NUM]), Arc::new(Type::NUM));
+            let expected = Type::Func(Arc::new([Type::NUM]), Arc::new(inner_fn.clone()));
+            assert_eq!(d0.var_annotation, expected);
+
+            // inner Def’s body should finally be a Call whose type is NUM
+            if let E::Def(d1) = &d0.ret {
+                assert_eq!(d1.ret.get_type(), Type::NUM);
+            } else {
+                panic!("expected inner Def");
+            }
+        } else {
+            panic!("expected outer Def");
+        }
+    }
+
 
 }
