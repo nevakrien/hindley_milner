@@ -23,6 +23,9 @@ pub type GenericMap = HashMap<usize,Type>;
 /// by the end all generics in the map would not overlap
 /// 
 pub fn resolve_mappings(map:&GenericMap) -> (GenericMap,bool) {
+	println!("calling resolve_mappings");
+	
+
 	let mut changed = false;
 	let mut ans =GenericMap::new();
 
@@ -37,7 +40,7 @@ pub fn resolve_mappings(map:&GenericMap) -> (GenericMap,bool) {
 		while let Some(v) = map.get(cur) {
 			match v {
 				Type::Generic(i) => {
-					// println!("in resolve loop");
+					println!("in resolve loop");
 					if i==k {
 						break;
 					}
@@ -119,7 +122,7 @@ impl Type {
         &self,
         req: &Self,
         bounded_gens: GenericMap,
-        seen:&mut std::collections::HashSet<Type>,
+        seen:&mut std::collections::HashSet<(Type,Type)>,
     ) -> Result<(Self, Self, GenericMap, bool), ()> {
         use Type::*;
 
@@ -132,17 +135,16 @@ impl Type {
 		//         then the chagned from the first
 		// 		   would trigger a rerun later
 		//
-		//      2. while its true we are not checking for pairs properly
-		// 		   and yes this is technically losing info
-		//         checking for all pairs can be very expensive O(N^2 * runs)
-		//         and it is not necissrally worth it for most apps
-		if !seen.insert(self.clone()) && !seen.insert(req.clone()) {
+		//      2. if the pair is wrong the error was returned earlier
+		if !seen.insert((self.clone(),req.clone())) {
 			return Ok((self.clone(),req.clone(),bounded_gens,false))
 		}
 
         match (self, req) {
             // ───── concrete basics ─────────────────────────────────────────
             (Basic(a), Basic(b)) => {
+				println!("basic basic");
+
                 if a == b {
                     Ok((self.clone(), req.clone(), bounded_gens, false))
                 } else {
@@ -152,6 +154,8 @@ impl Type {
 
             // ───── self is a generic ───────────────────────────────────────
             (Generic(id), other) => {
+				println!("left gen");
+
                 if let Some(bound) = bounded_gens.clone().get(id) {
                     // The generic was already bound – unify the binding with `other`.
                     let (lhs, rhs, new_map, changed) =
@@ -169,6 +173,8 @@ impl Type {
 
             // ───── req is a generic (mirror of previous arm) ───────────────
             (other, Generic(id)) => {
+            	println!("right gen");
+
                 if let Some(bound) = bounded_gens.clone().get(id) {
                     let (lhs, rhs, new_map, changed) =
                         other._was_used_as(bound, bounded_gens,seen)?;
@@ -181,6 +187,9 @@ impl Type {
 
             // ───── tuples – arity must match ───────────────────────────────
             (Tuple(xs), Tuple(ys)) => {
+            	println!("tuples");
+                
+
                 if xs.len() != ys.len() {
                     return Err(());
                 }
@@ -208,6 +217,8 @@ impl Type {
 
             // ───── functions – parameter-count must match ──────────────────
             (Func(px, rx), Func(py, ry)) => {
+            	println!("funcs");
+
                 if px.len() != py.len() {
                     return Err(());
                 }
@@ -278,6 +289,8 @@ pub fn update_expr(exp:Expression,mut bounded_gens:GenericMap,mut def_map:DefMap
 
 	match exp {
 		Expression::Ref(i, ref t) => {
+			println!("ref update_expr");
+
 			//limit the definined var by the refrence
 			let mut var = def_map[&i].clone();
 			let tdef = var.get_type_ref();
@@ -290,6 +303,8 @@ pub fn update_expr(exp:Expression,mut bounded_gens:GenericMap,mut def_map:DefMap
 			Ok((me,bounded_gens,def_map,b))
 		},
 		Expression::Def(mut def) => {
+			println!("def update_expr");
+
 			let mut changed = false;
 			
 			let (_x,t,bounded_gens,b) = def.var_val.get_type().was_used_as(&def.var_annotation,bounded_gens)?;
@@ -312,9 +327,16 @@ pub fn update_expr(exp:Expression,mut bounded_gens:GenericMap,mut def_map:DefMap
 			Ok((Expression::Def(def),bounded_gens,def_map,changed))
 
 		}
-		Expression::Lit(_) | Expression::Builtin(_) => Ok((exp,bounded_gens,def_map,false)),
+		Expression::Lit(_) | Expression::Builtin(_) => {
+			println!("terminal update_expr");
+			
+			Ok((exp,bounded_gens,def_map,false))
+		},
 
 		Expression::Tuple(arr) => {
+			println!("tuple update_expr");
+
+
 			let mut changed = false;
 			let mut v = Vec::with_capacity(arr.len());
 			for e in arr.into_iter() {
@@ -328,7 +350,7 @@ pub fn update_expr(exp:Expression,mut bounded_gens:GenericMap,mut def_map:DefMap
 			Ok((Expression::Tuple(v.into()),bounded_gens,def_map,changed))
 		},
 		Expression::Lambda(l)  => {
-			// println!("calling lambda resolve");
+			println!("calling lambda resolve update_expr");
 
 			let mut changed = false;
 
@@ -355,6 +377,8 @@ pub fn update_expr(exp:Expression,mut bounded_gens:GenericMap,mut def_map:DefMap
 		},
 
 		Expression::Call(out,args , out_anot) => {
+			println!("resolving call update_expr");
+			
 			let mut changed = false;
 
 			let (out,mut bounded_gens,_,b) = update_expr((*out).clone(),bounded_gens,def_map.clone())?;
@@ -697,6 +721,67 @@ use super::*;                // pull in everything we just defined
             panic!("expected outer Def");
         }
     }
+
+    #[test]
+fn tuple_second_field_mismatch_is_silently_accepted() {
+    use crate::expression::{Expression as E, DefExp};
+    use crate::value::Value;
+
+    // reusable helpers ----------------------------------------------------
+    fn lit(n: i64) -> E { E::Lit(Value::Int(n)) }
+
+    // (NUM , NUM)
+    let inner_tuple_ty = Type::Tuple(Arc::new([Type::NUM, Type::NUM]));
+
+    // value part ----------------------------------------------------------
+    //
+    //   v_val  = ( (1,2) , 3 )
+    //                └──┬──┘   ^^^^^   *scalar* (NUM)  ←─ should not match
+    //                   │                     (NUM , NUM)
+    //                   └──────── first element is a 2-tuple
+    //
+    let v_val = E::Tuple(Arc::new([
+        E::Tuple(Arc::new([lit(1), lit(2)])),   // (1,2)         : (NUM , NUM)
+        lit(3),                                 // 3              : NUM  ❌
+    ]));
+
+    // annotation part -----------------------------------------------------
+    //
+    //   v_ann  = ( (NUM , NUM) , (NUM , NUM) )
+    //                       ^^^^^^^^^^^^^^^^^   2-tuple expected – mismatch
+    //
+    let v_ann = Type::Tuple(Arc::new([
+        inner_tuple_ty.clone(),      // ok – matches (1,2)
+        inner_tuple_ty.clone(),      // ✘ – conflicts with the scalar ‘3’
+    ]));
+
+    // full:   let v : v_ann = v_val in v
+    let expr = E::Def(Arc::new(DefExp {
+        var:            0,
+        var_val:        v_val,
+        var_annotation: v_ann.clone(),
+        ret:            E::Ref(0, v_ann),
+    }));
+
+    // A correct checker must *reject* this.
+    //
+    // Today, with the “seen-is-HashSet<Type>” guard, it is silently accepted
+    // because:
+    //   1. The first tuple field forces the type-checker to compare
+    //      (NUM , NUM)   with   (NUM , NUM)            → both identical,
+    //      hence **NUM** and the **inner tuple type** are *individually*
+    //      inserted into `seen`.
+    //   2. When the second field is reached the checker must compare
+    //          self = NUM             with         req = (NUM , NUM)
+    //      but *both* sides are now already in `seen`, so the short-circuit
+    //      triggers and the mismatch is **skipped**.
+    //
+    // If the short-circuit were sound, this call would return Err(()).
+    if find_typing(expr, GenericMap::new()).is_ok() {
+        panic!("type-checker accepted a (NUM) ≠ (NUM,NUM) mismatch");
+    }
+}
+
 
 
 }
